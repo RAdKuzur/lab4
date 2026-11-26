@@ -1,0 +1,5 @@
+.idea
+.env
+data/*.db
+data/*.jsonl
+trace-collector/.coverage

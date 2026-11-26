@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Трейсы</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+   <header>
+    <h1>Трассировка — список трейсов</h1>
+    <div class="user-box">
+      <span id="me"></span>
+      <button id="logout" type="button">Выйти</button>
+    </div>
+  </header>
+
+  <section class="filters">
+    <label>Сервис
+      <select id="f-service">
+        <option value="">все</option>
+        <option value="service-a">service-a</option>
+        <option value="service-b">service-b</option>
+      </select>
+    </label>
+    <label>Статус
+      <select id="f-status">
+        <option value="">все</option>
+        <option value="OK">OK</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+    </label>
+    <label>Мин. длительность, мс
+      <input id="f-min-dur" type="number" min="0" value="0">
+    </label>
+    <button id="btn-apply">Применить</button>
+  </section>
+
+  <section class="matrix-section">
+    <h2>Матрица обращений между сервисами</h2>
+    <p class="matrix-hint">
+      Значение в ячейке — относительная частота вызова (0–1):
+      строка вызывает столбец. 1.0 — самый частый переход.
+    </p>
+    <div id="service-matrix" class="matrix"></div>
+  </section>
+
+  <table id="traces">
+    <thead>
+      <tr>
+        <th>trace_id</th>
+        <th>Сервис</th>
+        <th>Операция</th>
+        <th>Длительность, мс</th>
+        <th>Статус</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="/app.js"></script>
+</body>
+</html>
