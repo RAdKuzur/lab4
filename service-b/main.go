@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -24,55 +26,101 @@ type Span struct {
 	Attributes map[string]interface{} `json:"attributes"`
 }
 
+func getEnv(key, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
 var (
-	collectorURL = "http://trace-collector:4318/v1/traces"
-	httpClient   = &http.Client{Timeout: 2 * time.Second}
+	collectorURL = getEnv(
+		"COLLECTOR_URL",
+		"http://trace-collector:4318/v1/traces",
+	)
+	httpClient = &http.Client{
+		Timeout: 2 * time.Second,
+	}
 )
 
 func genID(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("failed to generate ID: %v", err)
+	}
+
 	return hex.EncodeToString(b)
 }
 
 func sendSpan(s Span) {
-	body, _ := json.Marshal(s)
-	resp, err := httpClient.Post(collectorURL, "application/json", bytes.NewBuffer(body))
+	body, err := json.Marshal(s)
+	if err != nil {
+		log.Printf("failed to marshal span: %v", err)
+		return
+	}
+
+	resp, err := httpClient.Post(
+		collectorURL,
+		"application/json",
+		bytes.NewBuffer(body),
+	)
 	if err != nil {
 		log.Printf("failed to send span: %v", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		log.Printf("collector returned status: %s", resp.Status)
+	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
+
 	traceparent := r.Header.Get("traceparent")
 	parts := strings.Split(traceparent, "-")
+
 	traceID, parentID := "", ""
 	if len(parts) >= 4 {
 		traceID, parentID = parts[1], parts[2]
 	}
 
 	start := time.Now().UnixNano()
+
 	time.Sleep(10 * time.Millisecond)
+
 	end := time.Now().UnixNano()
 
 	w.Write([]byte("done"))
 
 	go sendSpan(Span{
-		TraceID: traceID, SpanID: genID(8), ParentID: parentID,
-		Name: "service-b-work", Service: "service-b", Kind: "SERVER",
-		StartTime: start, EndTime: end, Status: "OK",
-		Attributes: map[string]interface{}{"http.method": r.Method, "http.path": r.URL.Path},
+		TraceID:   traceID,
+		SpanID:    genID(8),
+		ParentID:  parentID,
+		Name:      "service-b-work",
+		Service:   "service-b",
+		Kind:      "SERVER",
+		StartTime: start,
+		EndTime:   end,
+		Status:    "OK",
+		Attributes: map[string]interface{}{
+			"http.method": r.Method,
+			"http.path":   r.URL.Path,
+		},
 	})
 }
 
 func main() {
 	http.HandleFunc("/", handler)
-	log.Println("Service B listening on :8082")
+
+	log.Printf("Service B listening on :8082")
+	log.Printf("Collector URL: %s", collectorURL)
+
 	log.Fatal(http.ListenAndServe(":8082", nil))
 }
