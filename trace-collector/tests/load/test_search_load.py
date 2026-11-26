@@ -1,7 +1,15 @@
+"""Нагрузочный тест поиска спанов по ``trace_id`` (``GET /spans``).
+
+Отправляет заданное число запросов с ограничением конкурентности,
+собирает латентности и ошибки и печатает сводку (RPS, среднее,
+P50/P95/P99, максимум). Если ``LOAD_TRACE_ID`` не задан, тест
+пропускается.
+"""
 import asyncio
 import os
 import statistics
 import time
+from typing import Optional
 
 import httpx
 import pytest
@@ -9,14 +17,23 @@ import pytest
 
 pytestmark = pytest.mark.load
 
-BASE_URL = os.getenv("COLLECTOR_URL", "http://trace-collector:4318")
-TRACE_ID = os.getenv("LOAD_TRACE_ID")
+BASE_URL: str = os.getenv("COLLECTOR_URL", "http://trace-collector:4318")
+TRACE_ID: Optional[str] = os.getenv("LOAD_TRACE_ID")
 
-TOTAL_REQUESTS = int(os.getenv("LOAD_SEARCH_REQUESTS", "500"))
-CONCURRENCY = int(os.getenv("LOAD_SEARCH_CONCURRENCY", "50"))
+TOTAL_REQUESTS: int = int(os.getenv("LOAD_SEARCH_REQUESTS", "500"))
+CONCURRENCY: int = int(os.getenv("LOAD_SEARCH_CONCURRENCY", "50"))
 
 
-def percentile(values, percent):
+def percentile(values: list[float], percent: float) -> float:
+    """Вычисляет перцентиль по списку значений.
+
+    Args:
+        values: Список числовых значений.
+        percent: Перцентиль в диапазоне 0–100.
+
+    Returns:
+        Значение перцентиля; 0, если список пуст.
+    """
     values = sorted(values)
     if not values:
         return 0
@@ -26,13 +43,24 @@ def percentile(values, percent):
 
 
 @pytest.mark.asyncio
-async def test_collector_trace_lookup_load():
+async def test_collector_trace_lookup_load() -> None:
+    """Выполняет нагрузочный прогон поиска по ``trace_id``.
+
+    Отправляет ``TOTAL_REQUESTS`` запросов с конкурентностью
+    ``CONCURRENCY``, собирает латентности и ошибки, печатает сводный
+    отчёт и проверяет отсутствие ошибок и полноту выборки латентностей.
+
+    Raises:
+        pytest.skip.Exception: Если ``LOAD_TRACE_ID`` не задан.
+        AssertionError: Если есть ошибки запросов или число собранных
+            латентностей не совпало с ``TOTAL_REQUESTS``.
+    """
     if not TRACE_ID:
         pytest.skip("Set LOAD_TRACE_ID to an existing trace_id")
 
     semaphore = asyncio.Semaphore(CONCURRENCY)
-    latencies = []
-    errors = []
+    latencies: list[float] = []
+    errors: list[str] = []
 
     async with httpx.AsyncClient(
         base_url=BASE_URL,
@@ -42,7 +70,8 @@ async def test_collector_trace_lookup_load():
         health = await client.get("/healthz")
         assert health.status_code == 200
 
-        async def search():
+        async def search() -> None:
+            """Отправляет один поисковый запрос и учитывает результат."""
             async with semaphore:
                 started = time.perf_counter()
 

@@ -3,3 +3,11 @@
 data/*.db
 data/*.jsonl
 trace-collector/.coverage
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+
+.venv/

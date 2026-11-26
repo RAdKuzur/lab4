@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+"""Экспресс-проверка работоспособности стенда трассировки.
+
+Скрипт поднимает (опционально) docker compose, дожидается готовности
+сервисов, загружает фикстуру, прогоняет набор проверок коллектора,
+маскирования, метрик, RBAC и сквозного сценария service-a → service-b.
+"""
 import argparse
 import json
 import os
@@ -7,23 +12,37 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Any, Optional
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-FIXTURE = os.path.join(ROOT, "fixtures", "seed_data.json")
-COLLECTOR = os.getenv("COLLECTOR_URL", "http://localhost:4318")
-SERVICE_A = os.getenv("SERVICE_A_URL", "http://localhost:8081")
-UI = os.getenv("UI_URL", "http://localhost:8080")
+ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+FIXTURE: str = os.path.join(ROOT, "fixtures", "seed_data.json")
+COLLECTOR: str = os.getenv("COLLECTOR_URL", "http://localhost:4318")
+SERVICE_A: str = os.getenv("SERVICE_A_URL", "http://localhost:8081")
+UI: str = os.getenv("UI_URL", "http://localhost:8080")
 
-EXPECTED_TRACES = 5
-EXPECTED_SPANS = 10
-EXPECTED_ERROR_TRACES = 2
+EXPECTED_TRACES: int = 5
+EXPECTED_SPANS: int = 10
+EXPECTED_ERROR_TRACES: int = 2
 
 
 def log(msg: str) -> None:
+    """Печатает информационное сообщение с префиксом.
+
+    Args:
+        msg: Текст сообщения.
+    """
     print(f"[verify] {msg}", flush=True)
 
 
 def fail(msg: str) -> None:
+    """Печатает сообщение об ошибке и завершает процесс с кодом 1.
+
+    Args:
+        msg: Текст ошибки.
+
+    Raises:
+        SystemExit: Всегда, с кодом возврата 1.
+    """
     print(f"[verify] FAIL: {msg}", file=sys.stderr, flush=True)
     sys.exit(1)
 
@@ -50,22 +69,45 @@ def http_post_json(url: str, body: dict, headers=None, timeout=5):
         return e.code, e.read()
 
 
-def wait_healthy(url: str, name: str, tries: int = 30, delay: float = 1.0) -> None:
+def wait_healthy(
+    url: str,
+    name: str,
+    tries: int = 30,
+    delay: float = 1.0,
+) -> None:
+    """Ожидает, пока сервис начнёт отвечать кодом 200.
+
+    Args:
+        url: Адрес проверки здоровья.
+        name: Человекочитаемое имя сервиса для логов.
+        tries: Число попыток.
+        delay: Пауза между попытками в секундах.
+
+    Raises:
+        SystemExit: Если сервис не поднялся за отведённое число попыток.
+    """
     log(f"waiting for {name} at {url} ...")
     for i in range(tries):
         code, _ = http_get(url, timeout=2)
         if code == 200:
-            log(f"{name} is up (attempt {i+1})")
+            log(f"{name} is up (attempt {i + 1})")
             return
         time.sleep(delay)
     fail(f"{name} not healthy after {tries} attempts")
 
 
 def compose_up() -> None:
+    """Поднимает стенд через docker compose.
+
+    Raises:
+        SystemExit: Если команда завершилась с ненулевым кодом.
+    """
     log("docker compose up -d --build")
     r = subprocess.run(
         ["docker", "compose", "up", "-d", "--build"],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
@@ -73,6 +115,14 @@ def compose_up() -> None:
 
 
 def load_fixture() -> int:
+    """Загружает спаны из фикстуры в коллектор.
+
+    Returns:
+        Число успешно принятых спанов (включая дубликаты).
+
+    Raises:
+        SystemExit: Если хотя бы один спан не удалось загрузить.
+    """
     log(f"loading fixture {FIXTURE}")
     with open(FIXTURE, encoding="utf-8") as f:
         data = json.load(f)
@@ -88,7 +138,10 @@ def load_fixture() -> int:
                 dup += 1
         else:
             err += 1
-            print(f"  span {s['span_id']}: {code} {body[:200]}", file=sys.stderr)
+            print(
+                f"  span {s['span_id']}: {code} {body[:200]}",
+                file=sys.stderr,
+            )
     log(f"fixture: {ok} added, {dup} duplicate, {err} errors (total {len(spans)})")
     if err > 0:
         fail(f"{err} spans failed to load")
@@ -96,6 +149,11 @@ def load_fixture() -> int:
 
 
 def check_traces() -> None:
+    """Проверяет наличие всех трасс из фикстуры в коллекторе.
+
+    Raises:
+        SystemExit: Если запрос не удался или трассы отсутствуют.
+    """
     log("checking /spans (all)")
     code, body = http_get(f"{COLLECTOR}/spans?limit=10000")
     if code != 200:
@@ -114,10 +172,18 @@ def check_traces() -> None:
     missing = fixture_ids - trace_ids
     if missing:
         fail(f"missing fixture traces: {sorted(missing)}")
-    log(f"all {len(fixture_ids)} fixture traces present (total traces in DB: {len(trace_ids)})")
+    log(
+        f"all {len(fixture_ids)} fixture traces present "
+        f"(total traces in DB: {len(trace_ids)})"
+    )
 
 
 def check_errors() -> None:
+    """Проверяет фильтр по статусу ERROR.
+
+    Raises:
+        SystemExit: Если запрос не удался или ожидаемые трассы отсутствуют.
+    """
     log("checking /spans?status=ERROR")
     code, body = http_get(f"{COLLECTOR}/spans?status=ERROR&limit=10000")
     if code != 200:
@@ -135,6 +201,11 @@ def check_errors() -> None:
 
 
 def check_service_filter() -> None:
+    """Проверяет фильтр по имени сервиса.
+
+    Raises:
+        SystemExit: Если запрос не удался или набор сервисов не совпал.
+    """
     log("checking /spans?service=payment-service")
     code, body = http_get(f"{COLLECTOR}/spans?service=payment-service&limit=10000")
     if code != 200:
@@ -149,6 +220,11 @@ def check_service_filter() -> None:
 
 
 def check_masking() -> None:
+    """Проверяет маскирование и удаление PII-атрибутов.
+
+    Raises:
+        SystemExit: Если маскирование или удаление не сработали.
+    """
     log("checking PII masking")
     code, body = http_get(f"{COLLECTOR}/spans?trace_id=22222222222222222222222222222222")
     if code != 200:
@@ -171,6 +247,11 @@ def check_masking() -> None:
 
 
 def check_metrics() -> None:
+    """Проверяет доступность и содержимое эндпоинта метрик.
+
+    Raises:
+        SystemExit: Если метрики недоступны или не содержат spans_total.
+    """
     log("checking /metrics")
     code, body = http_get(f"{COLLECTOR}/metrics")
     if code != 200:
@@ -182,6 +263,12 @@ def check_metrics() -> None:
 
 
 def check_audit_rbac() -> None:
+    """Проверяет RBAC на /audit/logs и наличие хеш-цепочки.
+
+    Raises:
+        SystemExit: Если код ответа не соответствует ожидаемому,
+            журнал пуст или в записи нет поля hash.
+    """
     log("checking /audit/logs RBAC")
     code, _ = http_get(f"{COLLECTOR}/audit/logs")
     if code != 403:
@@ -198,6 +285,12 @@ def check_audit_rbac() -> None:
 
 
 def check_service_a() -> None:
+    """Проверяет сквозной сценарий service-a → service-b.
+
+    Raises:
+        SystemExit: Если сервис недоступен, ответ не содержит trace_id
+            или в коллекторе не оказалось ровно двух спанов двух сервисов.
+    """
     log(f"calling {SERVICE_A}/ (Go service-a → service-b)")
     code, body = http_get(f"{SERVICE_A}/", timeout=10)
     if code != 200:
@@ -220,6 +313,11 @@ def check_service_a() -> None:
 
 
 def check_ui_available() -> None:
+    """Проверяет доступность страницы входа UI.
+
+    Raises:
+        SystemExit: Если страница вернула код, отличный от 200.
+    """
     log(f"checking UI at {UI}/login.html")
     code, _ = http_get(f"{UI}/login.html", timeout=5)
     if code != 200:
@@ -228,11 +326,19 @@ def check_ui_available() -> None:
 
 
 def main() -> None:
+    """Точка входа: разбирает аргументы и выполняет проверки."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["local", "ci"], default="local",
-                        help="local: поднять compose; ci: считать, что уже поднято")
-    parser.add_argument("--skip-e2e", action="store_true",
-                        help="пропустить проверку service-a → service-b")
+    parser.add_argument(
+        "--mode",
+        choices=["local", "ci"],
+        default="local",
+        help="local: поднять compose; ci: считать, что уже поднято",
+    )
+    parser.add_argument(
+        "--skip-e2e",
+        action="store_true",
+        help="пропустить проверку service-a → service-b",
+    )
     args = parser.parse_args()
 
     print("=" * 60)

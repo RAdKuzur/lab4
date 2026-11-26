@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import requests
 from fastapi import FastAPI, Request
@@ -14,19 +15,19 @@ from auth import (
     ROLE_LABELS,
 )
 
-COLLECTOR = os.getenv(
+COLLECTOR: str = os.getenv(
     "COLLECTOR_URL",
     "http://trace-collector:4318",
 )
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR: Path = Path(__file__).parent / "static"
 
-USERS_PATH = os.getenv(
+USERS_PATH: str = os.getenv(
     "USERS_PATH",
     "/app/config/users.json",
 )
 
-PUBLIC_PATHS = {
+PUBLIC_PATHS: set[str] = {
     "/login.html",
     "/login.css",
     "/login.js",
@@ -34,11 +35,20 @@ PUBLIC_PATHS = {
 
 
 def load_users() -> dict:
+    """Загружает справочник пользователей из JSON-файла.
+
+    Returns:
+        Словарь вида ``{username: {"display_name": ..., "role": ...}}``.
+
+    Raises:
+        OSError: Если файл недоступен для чтения.
+        json.JSONDecodeError: Если содержимое файла не является валидным JSON.
+    """
     with open(USERS_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
-USERS = load_users()
+USERS: dict = load_users()
 
 
 app = FastAPI(
@@ -47,19 +57,45 @@ app = FastAPI(
     version="1.0.0",
 )
 
-def get_session(request: Request):
+
+def get_session(request: Request) -> Optional[dict]:
+    """Извлекает и проверяет сессию из cookie запроса.
+
+    Args:
+        request: Входящий HTTP-запрос.
+
+    Returns:
+        Словарь ``{"user": ..., "role": ...}`` при валидной сессии, иначе None.
+    """
     token = request.cookies.get("session")
     return verify_session(token)
 
 
-def json_error(code: int, message: str):
+def json_error(code: int, message: str) -> JSONResponse:
+    """Формирует JSON-ответ с ошибкой.
+
+    Args:
+        code: HTTP-код ответа.
+        message: Текст ошибки.
+
+    Returns:
+        JSONResponse с телом ``{"error": message}``.
+    """
     return JSONResponse(
         status_code=code,
         content={"error": message},
     )
 
 
-def map_api(path: str) -> tuple:
+def map_api(path: str) -> tuple[Optional[str], str]:
+    """Сопоставляет путь UI-прокси с действием RBAC и путём коллектора.
+
+    Args:
+        path: Путь вида ``/api/spans``.
+
+    Returns:
+        Кортеж ``(action, target)``; для неизвестного пути — ``(None, "")``.
+    """
     routes = {
         "/api/spans": ("spans:read", "/spans"),
         "/api/audit/logs": ("audit:read", "/audit/logs"),
@@ -71,7 +107,17 @@ def map_api(path: str) -> tuple:
 
 
 @app.post("/api/login")
-async def login(request: Request):
+async def login(request: Request) -> JSONResponse:
+    """Аутентифицирует пользователя по имени и выдаёт cookie сессии.
+
+    Args:
+        request: Запрос с JSON-телом ``{"username": ...}``.
+
+    Returns:
+        JSONResponse с данными пользователя и установленной cookie
+        ``session`` либо ошибка 400 (невалидный JSON) / 401 (неизвестный
+        пользователь).
+    """
 
     try:
         data = json.loads(await request.body() or b"{}")
@@ -113,7 +159,12 @@ async def login(request: Request):
 
 
 @app.post("/api/logout")
-def logout():
+def logout() -> JSONResponse:
+    """Завершает сессию, удаляя cookie ``session``.
+
+    Returns:
+        JSONResponse ``{"ok": true}`` с удалённой cookie.
+    """
 
     response = JSONResponse({"ok": True})
 
@@ -124,8 +175,15 @@ def logout():
 
     return response
 
+
 @app.get("/api/users")
-def get_users():
+def get_users() -> dict:
+    """Возвращает список пользователей с ролями и метками.
+
+    Returns:
+        Словарь ``{"users": [...]}`` с полями username, display_name,
+        role и role_label.
+    """
 
     return {
         "users": [
@@ -145,6 +203,14 @@ def get_users():
 
 @app.get("/api/me")
 def get_me(request: Request):
+    """Возвращает данные текущего аутентифицированного пользователя.
+
+    Args:
+        request: Входящий HTTP-запрос с cookie сессии.
+
+    Returns:
+        Словарь с полями user, role, role_label либо ошибка 401.
+    """
 
     session = get_session(request)
 
@@ -160,8 +226,20 @@ def get_me(request: Request):
         ),
     }
 
+
 @app.get("/api/{path:path}")
-async def collector_proxy(path: str, request: Request):
+async def collector_proxy(path: str, request: Request) -> Response:
+    """Проксирует запрос к коллектору с проверкой прав по RBAC.
+
+    Args:
+        path: Путь после ``/api/``.
+        request: Входящий HTTP-запрос.
+
+    Returns:
+        Ответ коллектора с добавленными заголовками ``X-Auth-User`` и
+        ``X-Auth-Role``; ошибка 401 (нет сессии), 404 (неизвестный API),
+        403 (недостаточно прав) или 502 (ошибка обращения к коллектору).
+    """
 
     session = get_session(request)
 
@@ -213,9 +291,25 @@ async def collector_proxy(path: str, request: Request):
     except requests.RequestException as e:
         return json_error(502, str(e))
 
+
 @app.get("/")
 @app.get("/{path:path}")
-def static_files(path: str, request: Request):
+def static_files(path: str, request: Request) -> Response:
+    """Отдаёт статические файлы UI с проверкой аутентификации.
+
+    Публичные пути из ``PUBLIC_PATHS`` доступны без сессии; для остальных
+    при отсутствии сессии выполняется редирект на ``/login.html``.
+    Пустой путь трактуется как ``index.html``. Выход за пределы
+    ``STATIC_DIR`` запрещён.
+
+    Args:
+        path: Запрошенный путь относительно каталога статики.
+        request: Входящий HTTP-запрос.
+
+    Returns:
+        FileResponse с файлом, RedirectResponse на страницу входа или
+        ошибка 404.
+    """
 
     requested_path = "/" + path
 

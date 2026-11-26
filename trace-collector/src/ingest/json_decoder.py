@@ -1,8 +1,15 @@
+"""Декодирование и валидация спанов, пришедших в JSON.
+
+Проверяет обязательные поля и формат идентификаторов, подставляет
+значения по умолчанию для необязательных полей и нормализует
+недопустимый статус в ``UNSET``.
+"""
 import json
+from typing import Any
 
-REQUIRED = ("trace_id", "span_id", "name", "service_name")
+REQUIRED: tuple[str, ...] = ("trace_id", "span_id", "name", "service_name")
 
-DEFAULTS = {
+DEFAULTS: dict[str, Any] = {
     "parent_span_id": None,
     "kind": "INTERNAL",
     "status": "UNSET",
@@ -14,7 +21,25 @@ DEFAULTS = {
 }
 
 
-def decode_span(raw: bytes) -> dict:
+def decode_span(raw: bytes) -> dict[str, Any]:
+    """Декодирует и валидирует спан из JSON-байтов.
+
+    Проверяет, что вход является JSON-объектом, содержит все поля из
+    ``REQUIRED`` и что ``trace_id``/``span_id`` состоят из нужного числа
+    hex-символов. Недостающие необязательные поля заполняются из
+    ``DEFAULTS``; недопустимый ``status`` приводится к ``UNSET``.
+
+    Args:
+        raw: Тело запроса в виде байтов.
+
+    Returns:
+        Словарь спана с заполненными полями и нормализованным статусом.
+
+    Raises:
+        ValueError: Если JSON невалиден, корень не является объектом,
+            отсутствует обязательное поле или идентификатор имеет
+            неверную длину либо не-hex символы.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:

@@ -1,7 +1,17 @@
+"""Тесты журнала аудита ``AuditLog``.
+
+Проверяют запись и чтение записей, уникальность хешей, связность
+хеш-цепочки после перезапуска и чтение пустого журнала.
+"""
 import json
 
 
-def test_append_and_read(tmp_audit):
+def test_append_and_read(tmp_audit) -> None:
+    """Проверяет добавление записей и их чтение в порядке добавления.
+
+    Args:
+        tmp_audit: Изолированный журнал аудита на временном файле.
+    """
     e1 = tmp_audit.append("ivan", "SRE", "SEARCH", {"limit": 10})
     e2 = tmp_audit.append("petr", "DEV", "SEARCH", {"limit": 5})
     assert e1["hash"] != e2["hash"]
@@ -12,7 +22,15 @@ def test_append_and_read(tmp_audit):
     assert logs[1]["role"] == "DEV"
 
 
-def test_hash_chain(tmp_path):
+def test_hash_chain(tmp_path) -> None:
+    """Проверяет связность хеш-цепочки после перезапуска журнала.
+
+    Второй экземпляр ``AuditLog`` над тем же файлом должен восстановить
+    хеш последней записи, чтобы третья запись ссылалась на вторую.
+
+    Args:
+        tmp_path: Временный каталог, предоставляемый pytest.
+    """
     from src.audit.audit_log import AuditLog
     path = str(tmp_path / "audit.jsonl")
     a = AuditLog(path)
@@ -26,5 +44,10 @@ def test_hash_chain(tmp_path):
     assert len(logs) == 3
 
 
-def test_read_empty(tmp_audit):
+def test_read_empty(tmp_audit) -> None:
+    """Проверяет, что пустой журнал читается как пустой список.
+
+    Args:
+        tmp_audit: Изолированный журнал аудита на временном файле.
+    """
     assert tmp_audit.read_all() == []

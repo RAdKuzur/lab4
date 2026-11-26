@@ -1,8 +1,22 @@
+"""Тесты разбора заголовка W3C Trace Context ``traceparent``.
+
+Проверяют корректный разбор эталонной строки и отклонение набора
+некорректных значений, включая отдельный случай с пробелом по краям,
+который должен успешно разбираться благодаря ``strip``.
+"""
+from typing import Optional
+
 import pytest
+
 from src.ingest.header_parser import parse_traceparent
 
 
-def test_valid_traceparent():
+def test_valid_traceparent() -> None:
+    """Проверяет разбор корректного ``traceparent`` в словарь полей.
+
+    Ожидается ``{"trace_id", "span_id", "flags"}`` с сохранением
+    исходных значений.
+    """
     r = parse_traceparent("00-814c0dc5573cd646cdfb9f1a97a47f2c-5ae5b85246fa251d-01")
     assert r == {
         "trace_id": "814c0dc5573cd646cdfb9f1a97a47f2c",
@@ -20,7 +34,16 @@ def test_valid_traceparent():
     "00-ZZZZ0dc5573cd646cdfb9f1a97a47f2c-5ae5b85246fa251d-01",          # не hex
     "00-814c0dc5573cd646cdfb9f1a97a47f2c-5ae5b85246fa251d-01 ",         # пробел в конце (но strip)
 ])
-def test_invalid_traceparent(bad):
+def test_invalid_traceparent(bad: Optional[str]) -> None:
+    """Проверяет обработку некорректных значений ``traceparent``.
+
+    Все значения, кроме строки с пробелом в конце, должны давать None.
+    Строка с пробелом по краям допускается: ``parse_traceparent``
+    обрезает её перед проверкой, поэтому результат не None.
+
+    Args:
+        bad: Проверяемое значение заголовка (строка или None).
+    """
     if bad == "00-814c0dc5573cd646cdfb9f1a97a47f2c-5ae5b85246fa251d-01 ":
         assert parse_traceparent(bad) is not None
     else:

@@ -1,10 +1,16 @@
+"""HTTP-сервис сбора и запроса трассировок (Trace Collector).
 
+Принимает спаны по OTLP-совместимому JSON-эндпоинту ``POST /v1/traces``,
+маскирует PII, сохраняет в SQLite, отдаёт поиск по ``/spans``, метрики
+Prometheus и журнал аудита с разграничением доступа по ролям.
+"""
 import asyncio
 import json
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -22,8 +28,22 @@ from src.query.trace_lookup import lookup
 from src.policy import masking
 from src.audit.audit_log import AuditLog
 
+
 class JsonFormatter(logging.Formatter):
-    def format(self, record):
+    """Форматтер логов, сериализующий запись в JSON.
+
+    Поля: ``ts`` (время), ``level`` (уровень), ``msg`` (сообщение).
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Форматирует запись лога в JSON-строку.
+
+        Args:
+            record: Запись лога.
+
+        Returns:
+            JSON-строка с полями ts, level, msg.
+        """
         return json.dumps({
             "ts": self.formatTime(record),
             "level": record.levelname,
@@ -31,7 +51,7 @@ class JsonFormatter(logging.Formatter):
         })
 
 
-handler = logging.StreamHandler()
+handler: logging.Handler = logging.StreamHandler()
 handler.setFormatter(JsonFormatter())
 
 logging.basicConfig(
@@ -39,25 +59,30 @@ logging.basicConfig(
     handlers=[handler],
 )
 
-log = logging.getLogger("collector")
+log: logging.Logger = logging.getLogger("collector")
 
 
-DB_PATH = os.getenv("SPAN_DB_PATH", "/data/spans.db")
-AUDIT_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.jsonl")
+DB_PATH: str = os.getenv("SPAN_DB_PATH", "/data/spans.db")
+AUDIT_PATH: str = os.getenv("AUDIT_LOG_PATH", "/data/audit.jsonl")
 
-STORE = SpanStore(DB_PATH)
-AUDIT = AuditLog(AUDIT_PATH)
-MASK_RULES = masking.load_rules()
+STORE: SpanStore = SpanStore(DB_PATH)
+AUDIT: AuditLog = AuditLog(AUDIT_PATH)
+MASK_RULES: dict[str, Any] = masking.load_rules()
 
-REJECTED = {
+REJECTED: dict[str, Any] = {
     "total": 0,
     "by_reason": {},
 }
 
-REJECTED_LOCK = threading.Lock()
+REJECTED_LOCK: threading.Lock = threading.Lock()
 
 
 def reject(reason: str) -> None:
+    """Учитывает отклонённый запрос в счётчике отказов.
+
+    Args:
+        reason: Причина отказа (например, ``bad_content_type``).
+    """
     with REJECTED_LOCK:
         REJECTED["total"] += 1
 
@@ -65,7 +90,13 @@ def reject(reason: str) -> None:
             REJECTED["by_reason"].get(reason, 0) + 1
         )
 
-async def retention_worker():
+
+async def retention_worker() -> None:
+    """Фоновая задача периодического удаления старых спанов.
+
+    Раз в час вызывает ``STORE.apply_retention(hot_days=7)`` в threadpool.
+    Ошибки логируются и не прерывают цикл.
+    """
     while True:
         await asyncio.sleep(3600)
 
@@ -84,7 +115,18 @@ async def retention_worker():
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Управляет жизненным циклом приложения.
+
+    При старте запускает ``retention_worker``, при остановке отменяет
+    задачу и дожидается её завершения.
+
+    Args:
+        app: Экземпляр FastAPI.
+
+    Yields:
+        None на время работы приложения.
+    """
     task = asyncio.create_task(retention_worker())
 
     log.info("Trace Collector started")
@@ -102,6 +144,7 @@ async def lifespan(app: FastAPI):
 
         log.info("Trace Collector stopped")
 
+
 app = FastAPI(
     title="Trace Collector",
     description="Distributed tracing collector and query API",
@@ -109,7 +152,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-def error_response(code: int, message: str):
+
+def error_response(code: int, message: str) -> JSONResponse:
+    """Формирует JSON-ответ с ошибкой.
+
+    Args:
+        code: HTTP-код ответа.
+        message: Текст ошибки.
+
+    Returns:
+        JSONResponse с телом ``{"error": message}``.
+    """
     return JSONResponse(
         status_code=code,
         content={"error": message},
@@ -117,19 +170,53 @@ def error_response(code: int, message: str):
 
 
 def get_role(request: Request) -> str:
+    """Извлекает роль из заголовка ``X-Role``.
+
+    Args:
+        request: Входящий HTTP-запрос.
+
+    Returns:
+        Значение заголовка ``X-Role`` или ``viewer``, если он не задан.
+    """
     return request.headers.get("X-Role", "viewer")
 
+
 @app.get("/healthz")
-def health():
+def health() -> dict[str, str]:
+    """Проверка живости сервиса.
+
+    Returns:
+        ``{"status": "ok"}``.
+    """
     return {"status": "ok"}
 
 
 @app.get("/readyz")
-def readiness():
+def readiness() -> dict[str, bool]:
+    """Проверка готовности сервиса.
+
+    Returns:
+        ``{"ready": True}``.
+    """
     return {"ready": True}
 
+
 @app.post("/v1/traces")
-async def ingest_trace(request: Request):
+async def ingest_trace(request: Request) -> Any:
+    """Принимает и сохраняет один спан.
+
+    Последовательно проверяет ``Content-Type``, ``Content-Length``,
+    длину тела, декодирует спан, валидирует ``traceparent``, применяет
+    маскирование и сохраняет в хранилище.
+
+    Args:
+        request: HTTP-запрос с JSON-телом спана.
+
+    Returns:
+        ``{"status": "ok"}`` при успешной записи,
+        ``{"status": "duplicate"}`` для дубликата,
+        либо JSON-ответ с ошибкой (400/415).
+    """
 
     # Content-Type validation
     ok, msg = check_content_type(
@@ -192,11 +279,18 @@ async def ingest_trace(request: Request):
 
     return {"status": "ok"}
 
+
 @app.get(
     "/metrics",
     response_class=PlainTextResponse,
 )
-def metrics():
+def metrics() -> PlainTextResponse:
+    """Отдаёт метрики в формате Prometheus.
+
+    Returns:
+        Текстовый ответ с ``spans_total``, ``spans_rejected_total`` и
+        разбивкой отказов по причинам.
+    """
 
     with REJECTED_LOCK:
         rejected_total = REJECTED["total"]
@@ -223,15 +317,33 @@ def metrics():
         media_type="text/plain; version=0.0.4",
     )
 
+
 @app.get("/spans")
 async def get_spans(
     request: Request,
-    trace_id: str | None = None,
-    service: str | None = None,
-    status: str | None = None,
+    trace_id: Optional[str] = None,
+    service: Optional[str] = None,
+    status: Optional[str] = None,
     limit: int = 1000,
-    min_duration_ms: float | None = None,
-):
+    min_duration_ms: Optional[float] = None,
+) -> Any:
+    """Ищет спаны по ``trace_id`` или по комбинации фильтров.
+
+    Каждый поиск фиксируется в журнале аудита. Числовые параметры
+    валидируются: ``limit < 1`` и отрицательный ``min_duration_ms``
+    дают 400.
+
+    Args:
+        request: Входящий HTTP-запрос.
+        trace_id: Идентификатор трассы (32 hex-символа).
+        service: Имя сервиса.
+        status: Статус спана.
+        limit: Максимальное число возвращаемых спанов.
+        min_duration_ms: Минимальная длительность в миллисекундах.
+
+    Returns:
+        Словарь ``{"spans", "total", "truncated"}`` либо ошибка 400.
+    """
 
     if limit < 1:
         return error_response(
@@ -297,8 +409,17 @@ async def get_spans(
         "truncated": truncated,
     }
 
+
 @app.get("/audit/logs")
-async def audit_logs(request: Request):
+async def audit_logs(request: Request) -> Any:
+    """Возвращает журнал аудита для ролей ADMIN и AUDITOR.
+
+    Args:
+        request: Входящий HTTP-запрос.
+
+    Returns:
+        ``{"logs": [...]}`` при наличии прав, иначе ошибка 403.
+    """
 
     role = get_role(request)
 
@@ -312,6 +433,7 @@ async def audit_logs(request: Request):
     return {
         "logs": logs,
     }
+
 
 if __name__ == "__main__":
 

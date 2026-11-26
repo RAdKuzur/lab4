@@ -1,14 +1,33 @@
+"""Тесты декодирования и валидации спанов ``decode_span``.
+
+Проверяют корректный проход, подстановку значений по умолчанию,
+ошибки формата и обязательных полей, валидацию идентификаторов и
+нормализацию недопустимого статуса.
+"""
 import json
+from typing import Any
+
 import pytest
+
 from src.ingest.json_decoder import decode_span
 
 
-def test_decode_valid(sample_span):
+def test_decode_valid(sample_span: dict[str, Any]) -> None:
+    """Проверяет, что корректный спан декодируется без изменений.
+
+    Args:
+        sample_span: Эталонный спан из общей фикстуры.
+    """
     raw = json.dumps(sample_span).encode()
     assert decode_span(raw) == sample_span
 
 
-def test_decode_with_defaults():
+def test_decode_with_defaults() -> None:
+    """Проверяет подстановку значений по умолчанию для необязательных полей.
+
+    Для минимального набора полей ожидаются ``kind=INTERNAL``,
+    ``status=UNSET`` и пустые ``attributes``, ``events``, ``links``.
+    """
     raw = json.dumps({
         "trace_id": "a" * 32, "span_id": "b" * 16,
         "name": "t", "service_name": "s",
@@ -26,7 +45,14 @@ def test_decode_with_defaults():
     (b'["array"]', "must be an object"),
     (b'{"trace_id":"' + b"a"*32 + b'","span_id":"' + b"b"*16 + b'"}', "missing field: name"),
 ])
-def test_decode_errors(raw, match):
+def test_decode_errors(raw: bytes, match: str) -> None:
+    """Проверяет ошибки декодирования: невалидный JSON, не-объект,
+    отсутствие обязательного поля.
+
+    Args:
+        raw: Тело запроса в виде байтов.
+        match: Ожидаемая подстрока в сообщении ``ValueError``.
+    """
     with pytest.raises(ValueError, match=match):
         decode_span(raw)
 
@@ -37,13 +63,31 @@ def test_decode_errors(raw, match):
     ("span_id", "xyz", "span_id must be 16 hex chars"),
     ("span_id", "Z"*16, "span_id must be 16 hex chars"),
 ])
-def test_decode_bad_ids(sample_span, field, bad_value, match):
+def test_decode_bad_ids(
+    sample_span: dict[str, Any],
+    field: str,
+    bad_value: str,
+    match: str,
+) -> None:
+    """Проверяет валидацию ``trace_id`` и ``span_id``.
+
+    Args:
+        sample_span: Эталонный спан, от которого строится вариант.
+        field: Имя подменяемого поля.
+        bad_value: Некорректное значение поля.
+        match: Ожидаемая подстрока в сообщении ``ValueError``.
+    """
     data = dict(sample_span, **{field: bad_value})
     with pytest.raises(ValueError, match=match):
         decode_span(json.dumps(data).encode())
 
 
-def test_decode_normalizes_bad_status(sample_span):
+def test_decode_normalizes_bad_status(sample_span: dict[str, Any]) -> None:
+    """Проверяет нормализацию недопустимого статуса в ``UNSET``.
+
+    Args:
+        sample_span: Эталонный спан, у которого подменяется статус.
+    """
     data = dict(sample_span, status="WEIRD")
     d = decode_span(json.dumps(data).encode())
     assert d["status"] == "UNSET"
