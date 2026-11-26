@@ -22,7 +22,6 @@ def test_hash_chain(tmp_path):
     b = AuditLog(path)
     e3 = b.append("u3", "ADMIN", "CONFIG_CHANGE", {"k": "v"})
     logs = b.read_all()
-    # hash третьей записи зависит от второй
     assert logs[-1]["hash"] == e3["hash"]
     assert len(logs) == 3
 

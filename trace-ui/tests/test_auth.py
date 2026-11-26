@@ -1,28 +1,42 @@
-import time
+
 import pytest
+
 from auth import (
-    can, make_session, verify_session, parse_cookie,
-    ROLE_MATRIX, ROLE_LABELS,
+    can,
+    make_session,
+    verify_session,
+    parse_cookie,
+    ROLE_MATRIX,
+    ROLE_LABELS,
 )
 
 
 def test_role_matrix_complete():
     assert set(ROLE_MATRIX.keys()) == {"SRE", "DEV", "ADMIN", "AUDITOR"}
+
     for role, actions in ROLE_MATRIX.items():
         assert "spans:read" in actions, f"{role} must read spans"
 
 
 @pytest.mark.parametrize("role,action,expected", [
-    ("SRE",     "spans:read",  True),
-    ("SRE",     "audit:read",  True),
-    ("SRE",     "pii:read",    True),
-    ("SRE",     "policies:write", False),
-    ("DEV",     "spans:read",  True),
-    ("DEV",     "audit:read",  False),
-    ("ADMIN",   "audit:read",  True),
-    ("ADMIN",   "policies:write", True),
-    ("AUDITOR", "audit:read",  True),
+    ("SRE", "spans:read", True),
+    ("SRE", "audit:read", False),
+    ("SRE", "pii:read", True),
+    ("SRE", "policies:write", False),
+
+    ("DEV", "spans:read", True),
+    ("DEV", "audit:read", False),
+    ("DEV", "pii:read", False),
+
+    ("ADMIN", "spans:read", True),
+    ("ADMIN", "audit:read", True),
+    ("ADMIN", "policies:write", True),
+    ("ADMIN", "pii:read", True),
+
+    ("AUDITOR", "spans:read", True),
+    ("AUDITOR", "audit:read", True),
     ("AUDITOR", "policies:write", False),
+    ("AUDITOR", "pii:read", True),
 ])
 def test_can(role, action, expected):
     assert can(role, action) is expected
@@ -34,15 +48,23 @@ def test_can_unknown_role():
 
 def test_make_and_verify():
     token = make_session("ivanov_sre", "SRE")
+
     assert "." in token
+
     data = verify_session(token)
-    assert data == {"user": "ivanov_sre", "role": "SRE"}
+
+    assert data == {
+        "user": "ivanov_sre",
+        "role": "SRE",
+    }
 
 
 def test_verify_tampered():
     token = make_session("ivanov_sre", "SRE")
     payload, sig = token.split(".")
+
     bad = payload[::-1] + "." + sig
+
     assert verify_session(bad) is None
 
 
@@ -56,8 +78,16 @@ def test_verify_garbage():
 def test_parse_cookie():
     assert parse_cookie(None) == {}
     assert parse_cookie("") == {}
-    assert parse_cookie("a=1; b=2") == {"a": "1", "b": "2"}
-    assert parse_cookie("session=abc; Path=/") == {"session": "abc", "Path": "/"}
+
+    assert parse_cookie("a=1; b=2") == {
+        "a": "1",
+        "b": "2",
+    }
+
+    assert parse_cookie("session=abc; Path=/") == {
+        "session": "abc",
+        "Path": "/",
+    }
 
 
 def test_role_labels_cover_all():
