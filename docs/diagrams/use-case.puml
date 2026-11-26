@@ -1,0 +1,79 @@
+@startuml UseCase_TraceSystem
+left to right direction
+skinparam packageStyle rectangle
+skinparam defaultFontName "Times New Roman"
+skinparam shadowing false
+skinparam actorStyle awesome
+
+actor "SRE" as SRE
+actor "Разработчик" as DEV
+actor "Администратор" as ADMIN
+actor "Аудитор безопасности" as AUDIT
+actor "Инструментированный\nсервис (OTel SDK)" as OTEL
+
+rectangle "Подсистема трассировки" {
+
+  usecase "Приём и валидация\nтелеметрии (OTLP)" as UC_INGEST
+  usecase "Хранение и индексация\nтрассировочных данных" as UC_STORE
+  usecase "Поиск и фильтрация\nтрейсов" as UC_SEARCH
+  usecase "Визуализация трейса\n(waterfall)" as UC_VIEW
+  usecase "Управление политиками\nсэмплирования" as UC_SAMPLING
+  usecase "Корреляция с метриками\nи логами" as UC_CORR
+  usecase "Журналирование аудита\nдействий пользователей" as UC_AUDITLOG
+  usecase "Управление доступом\nна основе ролей (RBAC)" as UC_RBAC
+
+  usecase "UC-1. Поиск и анализ\nтрейса с ошибкой" as UC1
+  usecase "UC-2. Проверка\npropagation контекста" as UC2
+  usecase "UC-3. Настройка\ntail-based сэмплирования" as UC3
+  usecase "UC-4. Аудит утечки\nPII в атрибутах" as UC4
+
+  usecase "А: Расширить окно /\nснять фильтр" as UC1A
+  usecase "Б: Агрегированное\nпредставление (>10k спанов)" as UC1B
+  usecase "А: Проверить инструментирование\nи traceparent" as UC2A
+  usecase "А: Подтверждение приоритета\nпри конфликте правил" as UC3A
+  usecase "А: Расширить шаблон\nпоиска PII" as UC4A
+
+  ' --- сквозные include (RBAC и аудит для всех сценариев) ---
+  UC1 ..> UC_RBAC     : <<include>>
+  UC1 ..> UC_AUDITLOG : <<include>>
+  UC2 ..> UC_RBAC     : <<include>>
+  UC3 ..> UC_RBAC     : <<include>>
+  UC3 ..> UC_AUDITLOG : <<include>>
+  UC4 ..> UC_RBAC     : <<include>>
+  UC4 ..> UC_AUDITLOG : <<include>>
+
+  ' --- основные include ---
+  UC1 ..> UC_SEARCH   : <<include>>
+  UC1 ..> UC_VIEW     : <<include>>
+  UC2 ..> UC_SEARCH   : <<include>>
+  UC2 ..> UC_VIEW     : <<include>>
+  UC3 ..> UC_SAMPLING : <<include>>
+  UC4 ..> UC_SEARCH   : <<include>>
+
+  ' --- корреляция расширяет просмотр (исправлено) ---
+  UC_CORR ..> UC_VIEW : <<extend>>
+
+  ' --- альтернативы ---
+  UC1A .> UC1 : <<extend>>
+  UC1B .> UC1 : <<extend>>
+  UC2A .> UC2 : <<extend>>
+  UC3A .> UC3 : <<extend>>
+  UC4A .> UC4 : <<extend>>
+
+  ' --- внутренние зависимости подсистемы ---
+  UC_SEARCH   ..> UC_STORE : <<include>>
+  UC_INGEST   ..> UC_STORE : <<include>>
+  UC_SAMPLING ..> UC_AUDITLOG : <<include>>
+}
+
+' --- акторы ---
+OTEL  --> UC_INGEST
+SRE   --> UC1
+DEV   --> UC2
+ADMIN --> UC3
+ADMIN --> UC_SAMPLING
+ADMIN --> UC_RBAC
+AUDIT --> UC4
+AUDIT --> UC_AUDITLOG
+
+@enduml

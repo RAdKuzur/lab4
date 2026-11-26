@@ -1,0 +1,107 @@
+
+@startuml Component_TraceSystem
+
+skinparam componentStyle uml2
+skinparam defaultFontName "Times New Roman"
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 50
+skinparam ranksep 60
+skinparam ArrowFontSize 11
+
+title Компонентная диаграмма системы распределённой трассировки
+
+package "Клиентская часть" {
+    [Веб-браузер] as CLIENT
+}
+
+package "Тестируемое микросервисное приложение (Go)" {
+    [Микросервис A\nHTTP API] as SERVICE_A
+    [Микросервис B\nHTTP API] as SERVICE_B
+    [Модуль трассировки\n(генерация spans)] as TRACE_SDK
+}
+
+package "Система сбора и анализа трассировок (Python 3.11 + FastAPI)" {
+
+    package "Trace Collector" {
+        [HTTP API\n(приём и обработка spans)] as COLLECTOR
+        [Модуль декодирования\nJSON] as DECODER
+        [Модуль проверки\nзаголовков] as VALIDATOR
+        [Модуль маскирования\nчувствительных данных] as MASKING
+        [Модуль хранения\nи поиска spans] as STORAGE
+        [Модуль поиска\nполных трассировок] as LOOKUP
+        [Модуль метрик\n(/metrics)] as METRICS
+        [Модуль аудита] as AUDIT
+        [Механизм хранения\nи очистки данных] as RETENTION
+    }
+
+    package "Trace UI" {
+        [Веб-интерфейс\n(HTML/CSS/JS)] as WEB
+        [API-интерфейс\n(FastAPI)] as UI_API
+        [Модуль аутентификации\nи управления сессиями] as AUTH
+        [Модуль RBAC\n(проверка ролей)] as RBAC
+        [Модуль взаимодействия\nс Collector] as PROXY
+    }
+}
+
+package "Хранилища данных" {
+    database "SQLite\n(spans.db)" as DB
+    artifact "JSONL\n(audit.jsonl)" as AUDIT_FILE
+    artifact "JSON\n(masking_rules.json)" as MASK_CONFIG
+    artifact "JSON\n(users.json)" as USERS
+}
+
+package "Инфраструктура" {
+    node "Docker Compose\ntracing-net" as DOCKER
+}
+
+' Взаимодействие тестируемых микросервисов
+SERVICE_A --> SERVICE_B : HTTP
+SERVICE_A --> TRACE_SDK
+SERVICE_B --> TRACE_SDK
+
+' Передача трассировок
+TRACE_SDK --> COLLECTOR : HTTP POST\n/v1/traces
+
+' Обработка входящих spans
+COLLECTOR --> DECODER
+DECODER --> VALIDATOR
+VALIDATOR --> MASKING
+MASK_CONFIG --> MASKING
+MASKING --> STORAGE
+STORAGE --> DB
+
+' Поиск и обслуживание данных
+UI_API --> PROXY
+PROXY --> COLLECTOR : HTTP GET\n/spans
+COLLECTOR --> LOOKUP
+LOOKUP --> DB
+COLLECTOR --> STORAGE
+
+' Аудит
+COLLECTOR --> AUDIT
+AUDIT --> AUDIT_FILE
+UI_API --> COLLECTOR : HTTP GET\n/audit/logs
+COLLECTOR --> AUDIT_FILE
+
+' Метрики и очистка
+COLLECTOR --> METRICS : GET /metrics
+RETENTION --> STORAGE : очистка старых spans
+RETENTION --> DB
+
+' Пользовательский интерфейс и безопасность
+CLIENT --> WEB : HTTPS / HTTP
+WEB --> UI_API : HTTP
+UI_API --> AUTH
+AUTH --> USERS
+UI_API --> RBAC
+RBAC --> PROXY
+
+' Инфраструктура
+DOCKER .. SERVICE_A
+DOCKER .. SERVICE_B
+DOCKER .. COLLECTOR
+DOCKER .. UI_API
+DOCKER .. DB
+
+@enduml

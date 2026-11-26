@@ -1,0 +1,165 @@
+@startuml ERD_TraceSystem
+hide circle
+skinparam linetype ortho
+skinparam defaultFontName "Times New Roman"
+skinparam shadowing false
+
+entity "trace" as TRACE {
+  * trace_id : bytes(16) <<PK>>
+  --
+  root_span_id : bytes(8) NOT NULL
+  service_name : string NOT NULL <<index>>
+  start_time_unix_nano : bigint NOT NULL <<index>>
+  end_time_unix_nano : bigint NOT NULL
+  duration_ns : bigint NOT NULL
+  status : enum(OK, ERROR, UNSET) NOT NULL <<index>>
+  has_error : bool NOT NULL
+  span_count : int NOT NULL
+  * sampling_policy_id : uuid <<FK>> NOT NULL
+  * retention_policy_id : uuid <<FK>> NOT NULL
+}
+
+entity "span" as SPAN {
+  * span_id : bytes(8) <<PK>>
+  * trace_id : bytes(16) <<FK>> NOT NULL <<index>>
+  --
+  parent_span_id : bytes(8) <<FK>> (nullable)
+  service_name : string NOT NULL <<index>>
+  name : string NOT NULL <<index>>
+  kind : enum(INTERNAL, SERVER, CLIENT,\nPRODUCER, CONSUMER) NOT NULL
+  start_time_unix_nano : bigint NOT NULL
+  end_time_unix_nano : bigint NOT NULL
+  status : enum(OK, ERROR, UNSET) NOT NULL
+  status_message : string
+}
+
+entity "span_attribute" as ATTR {
+  * attr_id : bigint <<PK>>
+  * span_id : bytes(8) <<FK>> NOT NULL <<index>>
+  --
+  key : string NOT NULL <<index>>
+  value_type : enum(STRING, INT, BOOL, DOUBLE) NOT NULL
+  value_str : string
+  value_num : double
+  value_bool : bool
+  is_sensitive : bool NOT NULL DEFAULT false
+  masked : bool NOT NULL DEFAULT false
+  * masking_rule_id : uuid <<FK>> (nullable)
+}
+
+entity "span_event" as EVENT {
+  * event_id : bigint <<PK>>
+  * span_id : bytes(8) <<FK>> NOT NULL <<index>>
+  --
+  name : string NOT NULL
+  time_unix_nano : bigint NOT NULL
+  attributes : json
+}
+
+entity "span_link" as LINK {
+  * link_id : bigint <<PK>>
+  * span_id : bytes(8) <<FK>> NOT NULL <<index>>
+  --
+  linked_trace_id : bytes(16) NOT NULL
+  linked_span_id : bytes(8) NOT NULL
+}
+
+entity "sampling_policy" as POLICY {
+  * policy_id : uuid <<PK>>
+  --
+  name : string NOT NULL
+  type : enum(HEAD, TAIL) NOT NULL
+  service_name : string
+  probability : float
+  error_always_keep : bool NOT NULL
+  latency_threshold_ms : int
+  priority : int NOT NULL
+  active : bool NOT NULL
+  created_by : uuid <<FK>> NOT NULL
+  created_at : timestamp NOT NULL
+}
+
+entity "retention_policy" as RETENTION {
+  * retention_id : uuid <<PK>>
+  --
+  data_class : enum(HOT, ARCHIVE) NOT NULL
+  ttl_days : int NOT NULL
+  active : bool NOT NULL
+  created_by : uuid <<FK>> NOT NULL
+}
+
+entity "masking_rule" as MASK {
+  * rule_id : uuid <<PK>>
+  --
+  attr_key_pattern : string NOT NULL
+  action : enum(MASK, DROP) NOT NULL
+  active : bool NOT NULL
+  created_by : uuid <<FK>> NOT NULL
+}
+
+entity "app_user" as USER {
+  * user_id : uuid <<PK>>
+  --
+  login : string NOT NULL
+  role : enum(SRE, DEV, ADMIN, AUDITOR) NOT NULL
+  pii_access_granted : bool NOT NULL DEFAULT false
+}
+
+entity "audit_log" as AUDIT {
+  * audit_id : bigint <<PK>>
+  --
+  ts : timestamp NOT NULL <<index>>
+  user_id : uuid <<FK>> NOT NULL
+  role : string NOT NULL
+  operation : enum(SEARCH, VIEW, EXPORT,\nCONFIG_CHANGE, PII_ACCESS) NOT NULL
+  params : json
+  old_value : json
+  new_value : json
+  immutable_hash : string NOT NULL
+}
+
+entity "service_dependency" as DEP {
+  * dep_id : bigint <<PK>>
+  --
+  source_service : string NOT NULL <<index>>
+  target_service : string NOT NULL <<index>>
+  operation : string
+  call_count : bigint NOT NULL
+  error_count : bigint NOT NULL
+  window_start : timestamp NOT NULL <<index>>
+  window_end : timestamp NOT NULL
+}
+
+entity "service_latency_agg" as LAT {
+  * agg_id : bigint <<PK>>
+  --
+  service_name : string NOT NULL <<index>>
+  operation : string <<index>>
+  window_start : timestamp NOT NULL <<index>>
+  window_end : timestamp NOT NULL
+  p50_ms : float NOT NULL
+  p95_ms : float NOT NULL
+  p99_ms : float NOT NULL
+  request_count : bigint NOT NULL
+  error_rate : float NOT NULL
+}
+
+
+TRACE ||--o{ SPAN : "содержит (1 : 0..*)"
+SPAN  }o--o| SPAN : "parent_span_id (0..* : 0..1)"
+SPAN  ||--o{ ATTR  : "имеет (1 : 0..*)"
+SPAN  ||--o{ EVENT : "содержит (1 : 0..*)"
+SPAN  ||--o{ LINK  : "ссылается (1 : 0..*)"
+
+POLICY    ||--o{ TRACE : "применяется (1 : 0..*)"
+RETENTION ||--o{ TRACE : "определяет TTL (1 : 0..*)"
+MASK      ||--o{ ATTR  : "маскирует (0..1 : 0..*)"
+
+POLICY    }o--|| USER : "создана (0..* : 1)"
+RETENTION }o--|| USER : "изменена (0..* : 1)"
+MASK      }o--|| USER : "изменено (0..* : 1)"
+AUDIT     }o--|| USER : "автор (0..* : 1)"
+
+DEP }o--|| LAT : "агрегируется в (0..* : 1)"
+
+@enduml
