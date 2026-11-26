@@ -7,5 +7,5 @@ RUN go build -o service .
 FROM alpine:latest
 WORKDIR /app
 COPY --from=builder /app/service .
-EXPOSE 8081 8082
+EXPOSE 8082
 CMD ["./service"]

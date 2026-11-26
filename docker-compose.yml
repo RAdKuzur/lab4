@@ -101,14 +101,25 @@ services:
     container_name: tests-collector
     volumes:
       - ./trace-collector:/app
+    environment:
+      - COLLECTOR_URL=http://trace-collector:4318
+      - LOAD_TOTAL_REQUESTS=1000
+      - LOAD_CONCURRENCY=50
+      - LOAD_SEARCH_REQUESTS=500
+      - LOAD_SEARCH_CONCURRENCY=50
+    depends_on:
+      trace-collector:
+        condition: service_healthy
     command:
       - "pytest"
+      - "-v"
+      - "-s"
       - "--cov=src"
       - "--cov-report=term-missing"
       - "--cov-fail-under=75"
     networks:
       - tracing-net
-    profiles: ["tests"]
+    profiles: [ "tests" ]
 
   tests-ui:
     build:
