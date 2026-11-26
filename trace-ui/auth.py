@@ -12,12 +12,25 @@ SESSION_TTL = 8 * 3600
 
 
 ROLE_MATRIX = {
-    "SRE":     {"spans:read", "audit:read", "pii:read"},
-    "DEV":     {"spans:read"},
-    "ADMIN":   {"spans:read", "audit:read", "policies:write", "pii:read"},
-    "AUDITOR": {"spans:read", "audit:read", "pii:read"},
+    "SRE": {
+        "spans:read",
+        "pii:read",
+    },
+    "DEV": {
+        "spans:read",
+    },
+    "ADMIN": {
+        "spans:read",
+        "audit:read",
+        "policies:write",
+        "pii:read",
+    },
+    "AUDITOR": {
+        "spans:read",
+        "audit:read",
+        "pii:read",
+    },
 }
-
 ROLE_LABELS = {
     "SRE": "SRE",
     "DEV": "Разработчик",

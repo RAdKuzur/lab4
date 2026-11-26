@@ -1,21 +1,36 @@
 import json
 import os
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
+from pathlib import Path
+
 import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from auth import (
     can,
     make_session,
     verify_session,
-    parse_cookie,
     ROLE_LABELS,
 )
 
-COLLECTOR = os.getenv("COLLECTOR_URL", "http://trace-collector:4318")
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-USERS_PATH = os.getenv("USERS_PATH", "/app/config/users.json")
-PUBLIC_PATHS = {"/login.html", "/login.css", "/login.js"}
+COLLECTOR = os.getenv(
+    "COLLECTOR_URL",
+    "http://trace-collector:4318",
+)
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+USERS_PATH = os.getenv(
+    "USERS_PATH",
+    "/app/config/users.json",
+)
+
+PUBLIC_PATHS = {
+    "/login.html",
+    "/login.css",
+    "/login.js",
+}
 
 
 def load_users() -> dict:
@@ -26,153 +41,220 @@ def load_users() -> dict:
 USERS = load_users()
 
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=STATIC_DIR, **kwargs)
-    def _session(self):
-        cookies = parse_cookie(self.headers.get("Cookie"))
-        return verify_session(cookies.get("session"))
+app = FastAPI(
+    title="Trace UI",
+    description="Web interface for Trace Collector",
+    version="1.0.0",
+)
 
-    def _send_json(self, code: int, payload: dict, extra_headers: dict | None = None):
-        body = json.dumps(payload).encode()
-        try:
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            for k, v in (extra_headers or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+def get_session(request: Request):
+    token = request.cookies.get("session")
+    return verify_session(token)
 
-    def _redirect(self, location: str, code: int = 302):
-        try:
-            self.send_response(code)
-            self.send_header("Location", location)
-            self.end_headers()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
 
-    def _read_body(self) -> bytes:
-        n = int(self.headers.get("Content-Length", 0))
-        return self.rfile.read(n) if n else b""
+def json_error(code: int, message: str):
+    return JSONResponse(
+        status_code=code,
+        content={"error": message},
+    )
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/login":
-            body = self._read_body()
-            try:
-                data = json.loads(body or b"{}")
-            except json.JSONDecodeError:
-                return self._send_json(400, {"error": "invalid json"})
 
-            username = data.get("username", "")
-            user = USERS.get(username)
-            if not user:
-                return self._send_json(401, {"error": "unknown user"})
+def map_api(path: str) -> tuple:
+    routes = {
+        "/api/spans": ("spans:read", "/spans"),
+        "/api/audit/logs": ("audit:read", "/audit/logs"),
+        "/api/healthz": ("spans:read", "/healthz"),
+        "/api/readyz": ("spans:read", "/readyz"),
+    }
 
-            token = make_session(username, user["role"])
-            cookie = f"session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800"
+    return routes.get(path, (None, ""))
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Set-Cookie", cookie)
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "user": username,
+
+@app.post("/api/login")
+async def login(request: Request):
+
+    try:
+        data = json.loads(await request.body() or b"{}")
+
+        if not isinstance(data, dict):
+            return json_error(400, "invalid json")
+
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return json_error(400, "invalid json")
+
+    username = data.get("username", "")
+    user = USERS.get(username)
+
+    if not user:
+        return json_error(401, "unknown user")
+
+    token = make_session(username, user["role"])
+
+    response = JSONResponse({
+        "user": username,
+        "display_name": user["display_name"],
+        "role": user["role"],
+        "role_label": ROLE_LABELS.get(
+            user["role"],
+            user["role"],
+        ),
+    })
+
+    response.set_cookie(
+        key="session",
+        value=token,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        max_age=28800,
+    )
+
+    return response
+
+
+@app.post("/api/logout")
+def logout():
+
+    response = JSONResponse({"ok": True})
+
+    response.delete_cookie(
+        key="session",
+        path="/",
+    )
+
+    return response
+
+@app.get("/api/users")
+def get_users():
+
+    return {
+        "users": [
+            {
+                "username": username,
                 "display_name": user["display_name"],
                 "role": user["role"],
-                "role_label": ROLE_LABELS.get(user["role"], user["role"]),
-            }).encode())
-            return
+                "role_label": ROLE_LABELS.get(
+                    user["role"],
+                    user["role"],
+                ),
+            }
+            for username, user in USERS.items()
+        ]
+    }
 
-        if parsed.path == "/api/logout":
-            self.send_response(200)
-            self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0")
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
-            return
 
-        return self._send_json(404, {"error": "not found"})
+@app.get("/api/me")
+def get_me(request: Request):
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
+    session = get_session(request)
 
-        if parsed.path in PUBLIC_PATHS:
-            return super().do_GET()
+    if not session:
+        return json_error(401, "unauthorized")
 
-        if parsed.path == "/api/users":
-            return self._send_json(200, {
-                "users": [
-                    {
-                        "username": u,
-                        "display_name": v["display_name"],
-                        "role": v["role"],
-                        "role_label": ROLE_LABELS.get(v["role"], v["role"]),
-                    }
-                    for u, v in USERS.items()
-                ]
-            })
+    return {
+        "user": session["user"],
+        "role": session["role"],
+        "role_label": ROLE_LABELS.get(
+            session["role"],
+            session["role"],
+        ),
+    }
 
-        session = self._session()
+@app.get("/api/{path:path}")
+async def collector_proxy(path: str, request: Request):
+
+    session = get_session(request)
+
+    if not session:
+        return json_error(401, "unauthorized")
+
+    action, target = map_api("/api/" + path)
+
+    if action is None:
+        return json_error(404, "unknown api")
+
+    if not can(session["role"], action):
+        return json_error(
+            403,
+            f"role {session['role']} cannot {action}",
+        )
+
+    url = COLLECTOR + target
+
+    if request.url.query:
+        url += "?" + request.url.query
+
+    headers = {
+        "X-User": session["user"],
+        "X-Role": session["role"],
+    }
+
+    try:
+        response = await run_in_threadpool(
+            requests.get,
+            url,
+            timeout=15,
+            headers=headers,
+        )
+
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers={
+                "Content-Type": response.headers.get(
+                    "Content-Type",
+                    "application/json",
+                ),
+                "X-Auth-User": session["user"],
+                "X-Auth-Role": session["role"],
+            },
+        )
+
+    except requests.RequestException as e:
+        return json_error(502, str(e))
+
+@app.get("/")
+@app.get("/{path:path}")
+def static_files(path: str, request: Request):
+
+    requested_path = "/" + path
+
+    if requested_path not in PUBLIC_PATHS:
+
+        session = get_session(request)
+
         if not session:
-            if parsed.path.startswith("/api/"):
-                return self._send_json(401, {"error": "unauthorized"})
-            return self._redirect("/login.html")
+            return RedirectResponse(
+                url="/login.html",
+                status_code=302,
+            )
 
-        if parsed.path == "/api/me":
-            return self._send_json(200, {
-                "user": session["user"],
-                "role": session["role"],
-                "role_label": ROLE_LABELS.get(session["role"], session["role"]),
-            })
+    if not path:
+        path = "index.html"
 
-        if parsed.path.startswith("/api/"):
-            action, target = self._map_api(parsed.path)
-            if action is None:
-                return self._send_json(404, {"error": "unknown api"})
-            if not can(session["role"], action):
-                return self._send_json(
-                    403, {"error": f"role {session['role']} cannot {action}"}
-                )
+    file_path = (STATIC_DIR / path).resolve()
 
-            url = COLLECTOR + target
-            if parsed.query:
-                url += "?" + parsed.query
-            headers = {"X-User": session["user"], "X-Role": session["role"]}
-            try:
-                r = requests.get(url, timeout=15, headers=headers)
-                self.send_response(r.status_code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("X-Auth-User", session["user"])
-                self.send_header("X-Auth-Role", session["role"])
-                self.end_headers()
-                self.wfile.write(r.content)
-            except requests.RequestException as e:
-                self._send_json(502, {"error": str(e)})
-            return
+    try:
+        file_path.relative_to(STATIC_DIR.resolve())
+    except ValueError:
+        return json_error(404, "not found")
 
-        return super().do_GET()
+    if not file_path.is_file():
+        return json_error(404, "not found")
 
-    @staticmethod
-    def _map_api(path: str) -> tuple:
-        if path == "/api/spans":
-            return "spans:read", "/spans"
-        if path == "/api/audit/logs":
-            return "audit:read", "/audit/logs"
-        if path == "/api/healthz":
-            return "spans:read", "/healthz"
-        if path == "/api/readyz":
-            return "spans:read", "/readyz"
-        return None, ""
-
-    def log_message(self, *args):
-        pass
+    return FileResponse(file_path)
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     port = int(os.getenv("UI_PORT", "8080"))
+
     print(f"UI listening on :{port}", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
